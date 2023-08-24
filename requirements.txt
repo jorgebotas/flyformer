@@ -1,0 +1,25 @@
+# To ensure app dependencies are ported from your virtual environment/host machine into your container, run 'pip freeze > requirements.txt' in the terminal to overwrite this file
+loompy
+numpy
+pytz
+tqdm>=4.27 # same as transfomers
+
+# Transformers
+datasets
+tensorflow # needed for Tensorboard logging
+tensorrt # Tensorflow integration with NVIDIA GPUs
+torch
+accelerate>=0.20.1 # same as transfomers
+transformers==4.31.0
+deepspeed
+
+# insilico_perturber_stats.py
+statsmodels
+seaborn
+scikit-learn
+scipy
+
+# emb_extractor.py
+anndata
+scanpy
+seaborn
