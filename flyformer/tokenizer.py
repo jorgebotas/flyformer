@@ -60,11 +60,12 @@ def read_pickle(path: Path) -> dict:
 class TranscriptomeTokenizer:
     def __init__(
         self,
-        gene_tdigest_file: Path,
-        custom_attr_name_dict: dict = None,
-        gene_percentile_file: Path = GENE_PERCENTILE_FILE,
+        gene_tdigest_file: Path = None,
+        gene_approx_cdf_file: Path = None,
+        gene_approx_cdf_nsample: int = 1001,
         gene_percentile_cutoffs: list = GENE_PERCENTILE_CUTOFFS,
         embedding_size: int = EMBEDDING_SIZE,
+        custom_attr_name_dict: dict = None,
     ):
         """
         Initialize tokenizer.
@@ -77,12 +78,6 @@ class TranscriptomeTokenizer:
             Values are the names of the attributes in the dataset.
         nproc : int
             Number of processes to use for dataset mapping.
-        gene_percentile_file : Path
-            Path to pickle file containing dictionary of percentile cutoffs of
-            gene expression based on whole flyformer-corpus. The token
-            dictionary will be created based on this object.
-            { <str>: ( <int>|<str>, <float> ) ... } = 
-            { gene: ( 20: <20th perc>, ... 80: <80th perc> ) }
         gene_tdigest_file : Path
             Path to pickle file containing dictionary of TDigest(s) of
             gene expression based on whole flyformer-corpus. The gene
@@ -99,21 +94,23 @@ class TranscriptomeTokenizer:
         # percentile cutoffs
         self.gene_percentile_cutoffs = gene_percentile_cutoffs
 
-        # Gene expression TDigest(s)
-        logger.info(f"Loading TDigest(s) from: {gene_tdigest_file}")
-        self.gene_tdigests = read_pickle(gene_tdigest_file)
-
-        # if gene_tdigest_file is not None:
-            # # Compute dictionary of gene expression percentile cutoffs 
-            # # based on gene TDigests of normalized expression across corpus
-            # self._compute_gene_percentiles_from_tdigest(gene_tdigest_file)
-        # else:
-            # # load dictionary of gene expression percentiles (cutoffs)
-            # self.gene_percentiles = read_pickle(gene_percentile_file)
+        if gene_approx_cdf_file:
+            logger.info(f"Loading approximated CDFs: {gene_approx_cdf_file}")
+            self.gene_approx_cdfs = read_pickle(gene_approx_cdf_file)
+            first_cdf = gene_approx_cdfs.values())[0]
+            self.gene_approx_cdf_nsample = len(list(first_cdf)
+        else:
+            # Gene expression TDigest(s)
+            logger.info(f"Loading TDigest(s): {gene_tdigest_file}")
+            gene_tdigests = read_pickle(gene_tdigest_file)
+            # Approximate CDF for gene token optimization
+            logger.info(f"Approximating CDFs from TDigest(s). n = {self.gene_approx_cdf_nsample}")
+            self.gene_approx_cdfs = self._approximate_gene_cdfs(gene_tdigests)
 
         logger.info("Generating token dictionary")
         self.gene_tokens = { "<pad>": 0, "<mask>": 1 }
         self._fill_gene_tokens()
+        logger.info(f"Vocabulary size: {len(self.gene_tokens.keys())}")
 
         # Model input size (embedding)
         self.embedding_size = embedding_size
@@ -124,6 +121,20 @@ class TranscriptomeTokenizer:
         # # protein-coding and miRNA gene list dictionary for 
         # # selecting .loom rows for tokenization
         # self.genelist_dict = dict(zip(gene_keys, [True] * len(gene_keys)))
+
+    def _approximate_gene_cdfs(self,
+            gene_tdigests: dict,
+       ) -> None:
+        """
+        Compute gene approximate CDF based on tdigest file and
+        `self.gene_approx_cdf_nsample`
+
+        Parameters
+        ----------
+        gene_tdigests: dict
+            Dictionary containing gene TDigests acrossflyformer-corpus.
+            { genename: <TDigest> }
+        """
 
     def _compute_gene_percentiles_from_tdigest(self, 
             gene_tdigest_file: Path
@@ -153,14 +164,57 @@ class TranscriptomeTokenizer:
                 self.gene_tokens[f"{gene}_{percentile}"] = idx
                 idx += 1
 
+    def _get_gene_percentile_cutoff(cdf: float) -> int:
+        """
+        Retrieve percentile cutoff associated to CDF
+
+        Parameters
+        ----------
+        cdf: float
+            CDF value corresponding to log1p gene expression of interest
+
+        Returns
+        ----------
+        percentile_cutoff: int
+            Percentile cut-off greater or equal to provided `cdf`
+        """
+        idx = np.argmax(self.gene_percentile_cutoffs >= cdf)
+        return self.gene_percentile_cutoffs[idx]
+
+    def _approximate_gene_cdf(self, gene: str, expression: float) -> float:
+        """
+        Approximate TDigest.cdf() to optimize tokenization
+        `self.gene_cdfs` contains approximated CDFs based on with resolution
+        `self.gene_approx_cdf_nsample`
+
+        Parameters
+        ----------
+        gene: str
+            Flybase genename. Key in `self.gene_tdigests` and
+            `self.gene_approx_cdfs`
+        expression: float
+            log1p normalized gene expression value
+
+        Returns
+        ----------
+        cdf: float
+            Approximate CDF value (analogous to TDigest.cdf(). i.e., percentile
+            associated to a provided expression value
+        """
+        gene_cdf = self.gene_cdfs.get(gene, np.array([np.inf]))
+        cdf_idx = np.argmax(gene_cdf)
+        cdf_percentile = (cdf_idx / self.gene_approx_cdf_nsample) * 100
+        return cdf_percentile
+
     def tokenize_gene(
             self, 
             gene: str,
             expression: float
         ) -> Tuple[float, float]:
         """
-        Return expression CDF value associated to gene's expression in TDigest
-        and gene token (based on cdf and `self.gene_percentile_cutoffs`)
+        Return expression CDF value approximated from gene's expression data
+        stored in TDigest and gene token (based on cdf and 
+        `self.gene_percentile_cutoffs`)
 
         Parameters
         ----------
@@ -168,6 +222,7 @@ class TranscriptomeTokenizer:
             Gene name (Flybase). Keys in `self.gene_tdigests`
         expression: float
             1e4 normalized and log1p transformed gene expression
+
         Returns
         ----------
         cdf: float
@@ -177,11 +232,8 @@ class TranscriptomeTokenizer:
             Token associated to gene and expression level (based on 
             `self.gene_percentile_cutoffs`). See `self.gene_tokens`
         """
-        tdigest = self.gene_tdigests.get(gene, TDIGEST_INF)
-        cdf = tdigest.cdf(expression)
-        percentile_cutoff = next(
-            pc for pc in self.gene_percentile_cutoffs if pc / 100 >= cdf
-        )
+        cdf = self._approximate_gene_cdf(gene, expression)
+        percentile_cutoff = self._get_gene_percentile_cutoff(cdf)
         token = self.gene_tokens.get(f"{gene}_{percentile_cutoff}", None)
         return cdf, percentile_cutoff, token
 
@@ -227,38 +279,8 @@ class TranscriptomeTokenizer:
             cells = np.array(data.ca.obs_names)
             for idx, cell in enumerate(tqdm(cells, desc=tqdm_desc)):
                 cell_data = data[:, idx]
-                self.tokenize_cell(cell_data, genes)
-                return
-
-            norm_factor_vector = np.array(
-                [
-                    self.gene_median_dict[i]
-                    for i in data.ra["ensembl_id"][coding_miRNA_loc]
-                ]
-            )
-            coding_miRNA_ids = data.ra["ensembl_id"][coding_miRNA_loc]
-            coding_miRNA_tokens = np.array(
-                [self.gene_token_dict[i] for i in coding_miRNA_ids]
-            )
-
-
-            # scan through .loom files and tokenize cells
-            tokenized_cells = []
-            for (_ix, _selection, view) in data.scan(items=filter_pass_loc, axis=1):
-                # select subview with protein-coding and miRNA genes
-                subview = view.view[coding_miRNA_loc, :]
-
-                subview_norm_array = (
-                    subview[:, :]
-                    / subview.ca.n_counts
-                    * 10_000
-                    / norm_factor_vector[:, None]
-                )
-                # tokenize subview gene vectors
-                tokenized_cells += [
-                    tokenize_cell(subview_norm_array[:, i], coding_miRNA_tokens)
-                    for i in range(subview_norm_array.shape[1])
-                ]
+                tokenized_cells.append(self.tokenize_cell(cell_data, genes))
+                break
 
                 # add custom attributes for subview to dict
                 if self.custom_attr_name_dict is not None:
