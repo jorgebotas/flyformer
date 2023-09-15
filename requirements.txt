@@ -23,3 +23,6 @@ scipy
 anndata
 scanpy
 seaborn
+
+# tokenizer
+ray==2.6.3

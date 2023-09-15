@@ -11,7 +11,7 @@ tokenized dataset as a custom attribute dictionary as shown below
 Usage:
   from flyformer import TranscriptomeTokenizer
   tk = TranscriptomeTokenizer({"cell_type": "cell_type", 
-                               "organ_major": "organ_major"}, nproc=4)
+                               "organ_major": "organ_major"})
   tk.tokenize_data("loom_data_directory", "output_directory", "output_prefix")
 """
 
@@ -19,26 +19,52 @@ import argparse
 from datasets import Dataset
 import loompy as lp
 import logging
+import numpy as np
 from pathlib import Path
 import pickle
+import ray
+from tdigest import TDigest
+from tqdm import tqdm
+from typing import Tuple
 import warnings
 
 warnings.filterwarnings("ignore", message=".*The 'nopython' keyword.*")
 
 logger = logging.getLogger(__name__)
 
-GENE_MEDIAN_FILE = Path(__file__).parent / "gene_median_dictionary.pkl"
-TOKEN_DICTIONARY_FILE = Path(__file__).parent / "token_dictionary.pkl"
+GENE_PERCENTILE_FILE = Path(__file__).parent / "gene_percentile_dictionary.pkl"
+GENE_PERCENTILE_CUTOFFS = [ 10, 25, 75, 90, 100 ]
+EMBEDDING_SIZE = 2**11
+# Create a TDigest that always returns a CDF of 0 (only value is infinity)
+TDIGEST_INF = TDigest()
+TDIGEST_INF.update("inf")
 
+
+def read_pickle(path: Path) -> dict:
+    """
+    Read pickle file and returns dictionary. Pickle file might be chunked
+    path: Path
+        Path to pickle file
+    Returns: dictionary containing content in pickle file
+    """
+    dictionary = {}
+    with open(path, "rb") as fp:
+        while True:
+            try:
+                dictionary = { **dictionary, **pickle.load(fp) }
+            except EOFError:
+                break
+        return dictionary
 
 
 class TranscriptomeTokenizer:
     def __init__(
         self,
+        gene_tdigest_file: Path,
         custom_attr_name_dict: dict = None,
-        nproc: int = 1,
-        gene_median_file : Path = GENE_MEDIAN_FILE,
-        token_dictionary_file=TOKEN_DICTIONARY_FILE,
+        gene_percentile_file: Path = GENE_PERCENTILE_FILE,
+        gene_percentile_cutoffs: list = GENE_PERCENTILE_CUTOFFS,
+        embedding_size: int = EMBEDDING_SIZE,
     ):
         """
         Initialize tokenizer.
@@ -57,38 +83,128 @@ class TranscriptomeTokenizer:
             dictionary will be created based on this object.
             { <str>: ( <int>|<str>, <float> ) ... } = 
             { gene: ( 20: <20th perc>, ... 80: <80th perc> ) }
+        gene_tdigest_file : Path
+            Path to pickle file containing dictionary of TDigest(s) of
+            gene expression based on whole flyformer-corpus. The gene
+            percentile dictionary will be created based on this object.
+            { gene: <TDigest> ... }
+        embedding_size: int
+            LLM model input size (embedding size). Default 2^11 = 2048
+            Cell embeddings will be truncated if it exceeds this number
         """
         # dictionary of custom attributes 
         # {output dataset column name: input .loom column name}
         self.custom_attr_name_dict = custom_attr_name_dict
 
-        # number of processes for dataset mapping
-        self.nproc = nproc
+        # percentile cutoffs
+        self.gene_percentile_cutoffs = gene_percentile_cutoffs
 
-        # load dictionary of gene expression percentiles (cutoffs)
-        with open(gene_median_file, "rb") as f:
-            self.gene_percentiles = pickle.load(f)
+        # Gene expression TDigest(s)
+        logger.info(f"Loading TDigest(s) from: {gene_tdigest_file}")
+        self.gene_tdigests = read_pickle(gene_tdigest_file)
 
-        self.gene_tokens = {}
-        for gene, percentiles in self.gene_percentiles:
-            self.gene_tokens = { 
-                **self.gene_tokens, 
-                **{ f"{gene}_{perc[0]}" for perc in percentiles }
-            }
+        # if gene_tdigest_file is not None:
+            # # Compute dictionary of gene expression percentile cutoffs 
+            # # based on gene TDigests of normalized expression across corpus
+            # self._compute_gene_percentiles_from_tdigest(gene_tdigest_file)
+        # else:
+            # # load dictionary of gene expression percentiles (cutoffs)
+            # self.gene_percentiles = read_pickle(gene_percentile_file)
 
-        # gene keys for full vocabulary
-        self.gene_keys = list(self.gene_median_dict.keys())
+        logger.info("Generating token dictionary")
+        self.gene_tokens = { "<pad>": 0, "<mask>": 1 }
+        self._fill_gene_tokens()
 
-        # protein-coding and miRNA gene list dictionary for 
-        # selecting .loom rows for tokenization
-        self.genelist_dict = dict(zip(self.gene_keys, [True] * len(self.gene_keys)))
+        # Model input size (embedding)
+        self.embedding_size = embedding_size
 
-    @staticmethod
-    def tokenize_cell(gene_vector, gene_tokens):
+        # # gene keys for full vocabulary
+        # gene_keys = list(self.gene_percentiles.keys())
+
+        # # protein-coding and miRNA gene list dictionary for 
+        # # selecting .loom rows for tokenization
+        # self.genelist_dict = dict(zip(gene_keys, [True] * len(gene_keys)))
+
+    def _compute_gene_percentiles_from_tdigest(self, 
+            gene_tdigest_file: Path
+        ) -> None:
+        """
+        Compute gene percentiles based on tdigest files
+
+        Parameters
+        ----------
+        gene_tdigest_file: Path
+            Path to pickle file containing gene TDigests across 
+            flyformer-corpus.
+            { genename: TDigest }
+        """
+        gene_tdigests = read_pickle(gene_tdigest_file)
+        self.gene_percentiles = { 
+            gene: [ 
+                [ p, tdig.percentile(p) ] for p in self.gene_percentile_cutoffs 
+            ] for gene, tdig in gene_tdigests.items()
+        }
+
+    def _fill_gene_tokens(self) -> None:
+        """Fills self.gene_tokens with data from self.gene_percentiles"""
+        idx = len(self.gene_tokens.keys())
+        for gene in self.gene_tdigests.keys():
+            for percentile in self.gene_percentile_cutoffs:
+                self.gene_tokens[f"{gene}_{percentile}"] = idx
+                idx += 1
+
+    def tokenize_gene(
+            self, 
+            gene: str,
+            expression: float
+        ) -> Tuple[float, float]:
+        """
+        Return expression CDF value associated to gene's expression in TDigest
+        and gene token (based on cdf and `self.gene_percentile_cutoffs`)
+
+        Parameters
+        ----------
+        gene: str
+            Gene name (Flybase). Keys in `self.gene_tdigests`
+        expression: float
+            1e4 normalized and log1p transformed gene expression
+        Returns
+        ----------
+        cdf: float
+            Cumulative Distribution Function value associated to gene
+            expression when compared to whole corpus (TDigest)
+        token: int
+            Token associated to gene and expression level (based on 
+            `self.gene_percentile_cutoffs`). See `self.gene_tokens`
+        """
+        tdigest = self.gene_tdigests.get(gene, TDIGEST_INF)
+        cdf = tdigest.cdf(expression)
+        percentile_cutoff = next(
+            pc for pc in self.gene_percentile_cutoffs if pc / 100 >= cdf
+        )
+        token = self.gene_tokens.get(f"{gene}_{percentile_cutoff}", None)
+        return cdf, percentile_cutoff, token
+
+
+    def tokenize_cell(self, cell_data: np.array, genes: np.array) -> np.array:
         """
         Convert normalized gene expression vector to tokenized rank value 
         encoding.
+
+        Parameters
+        ----------
         """
+        # Limit tokenization to non-zero expression genes
+        nonzero_mask = cell_data > 0
+        nonzero_genes = genes[nonzero_mask]
+        nonzero_expression = cell_data[nonzero_mask]
+        
+        cdf_expression, pc, gene_token = zip(*[
+            self.tokenize_gene(gene, expr)
+                for gene, expr in zip(nonzero_genes, nonzero_expression)
+        ])
+        print(list(zip(genes, cdf_expression, pc))[0:20])
+        return
         # create array of gene vector with token indices
         # mask undetected genes
         nonzero_mask = np.nonzero(gene_vector)[0]
@@ -98,17 +214,22 @@ class TranscriptomeTokenizer:
         sentence_tokens = gene_tokens[nonzero_mask][sorted_indices]
         return sentence_tokens
 
+    # @ray.remote
     def tokenize_file(self, loom_file_path):
-        if self.custom_attr_name_dict is not None:
-            file_cell_metadata = {
-                attr_key: [] for attr_key in self.custom_attr_name_dict.keys()
-            }
+        # if self.custom_attr_name_dict is not None:
+            # file_cell_metadata = {
+                # attr_key: [] for attr_key in self.custom_attr_name_dict.keys()
+            # }
 
+        tqdm_desc = f"Tokenizing {loom_file_path}"
         with lp.connect(str(loom_file_path)) as data:
-            # define coordinates of detected protein-coding or miRNA genes and vector of their normalization factors
-            coding_miRNA_loc = np.where(
-                [self.genelist_dict.get(i, False) for i in data.ra["ensembl_id"]]
-            )[0]
+            genes = np.array(data.ra.var_names)
+            cells = np.array(data.ca.obs_names)
+            for idx, cell in enumerate(tqdm(cells, desc=tqdm_desc)):
+                cell_data = data[:, idx]
+                self.tokenize_cell(cell_data, genes)
+                return
+
             norm_factor_vector = np.array(
                 [
                     self.gene_median_dict[i]
@@ -120,23 +241,6 @@ class TranscriptomeTokenizer:
                 [self.gene_token_dict[i] for i in coding_miRNA_ids]
             )
 
-            # define coordinates of cells passing filters for inclusion (e.g. QC)
-            try:
-                data.ca["filter_pass"]
-            except AttributeError:
-                var_exists = False
-            else:
-                var_exists = True
-
-            if var_exists is True:
-                filter_pass_loc = np.where(
-                    [True if i == 1 else False for i in data.ca["filter_pass"]]
-                )[0]
-            elif var_exists is False:
-                print(
-                    f"{loom_file_path} has no column attribute 'filter_pass'; tokenizing all cells."
-                )
-                filter_pass_loc = np.array([i for i in range(data.shape[1])])
 
             # scan through .loom files and tokenize cells
             tokenized_cells = []
@@ -144,8 +248,6 @@ class TranscriptomeTokenizer:
                 # select subview with protein-coding and miRNA genes
                 subview = view.view[coding_miRNA_loc, :]
 
-                # normalize by total counts per cell and multiply by 10,000 to allocate bits to precision
-                # and normalize by gene normalization factors
                 subview_norm_array = (
                     subview[:, :]
                     / subview.ca.n_counts
@@ -165,36 +267,47 @@ class TranscriptomeTokenizer:
                 else:
                     file_cell_metadata = None
 
-        return tokenized_cells, file_cell_metadata
+        return tokenized_cells #, file_cell_metadata
 
-    def tokenize_files(self, loom_data_directory):
-        tokenized_cells = []
-        if self.custom_attr_name_dict is not None:
-            loom_cell_attr = [attr_key for attr_key in self.custom_attr_name_dict.keys()]
-            cell_metadata = {attr_key: [] for attr_key in self.custom_attr_name_dict.values()}
+    def tokenize_files(self, loom_data_directory: Path) -> list:
+        """
 
-        # loops through directories to tokenize .loom files
-        file_found = 0
-        for loom_file_path in loom_data_directory.glob("*.loom"):
-            file_found = 1
-            print(f"Tokenizing {loom_file_path}")
-            file_tokenized_cells, file_cell_metadata = self.tokenize_file(
-                loom_file_path
-            )
-            tokenized_cells += file_tokenized_cells
-            if self.custom_attr_name_dict is not None:
-                for k in loom_cell_attr:
-                    cell_metadata[self.custom_attr_name_dict[k]] += file_cell_metadata[k]
-            else:
-                cell_metadata = None
-
-        if file_found == 0:
+        Parameters
+        ----------
+        """
+        loom_files = list(Path(loom_data_directory).glob("*.loom"))
+        
+        if len(loom_files) == 0:
             logger.error(
                 f"No .loom files found in directory {loom_data_directory}.")
             raise
-        return tokenized_cells, cell_metadata
 
-    def create_dataset(self, tokenized_cells, cell_metadata):
+        self.tokenize_file(loom_files[0])
+        return
+
+        # Initialize Ray
+        ray.init()
+
+        # Will store list of tokenized cells
+        tokenized_cells = []
+
+        # Loop through directories to tokenize .loom files in parallel (Ray)
+        for file_tokenized_cells in ray.get([
+                self.tokenize_file.remote(self, path) for path in loom_files
+            ]):
+            tokenized_cells += file_tokenized_cells
+
+        # Shutdown Ray
+        ray.shutdown()
+
+        return tokenized_cells
+
+    def create_dataset(self, tokenized_cells, cell_metadata, nproc=1):
+        """
+
+        Parameters
+        ----------
+        """
         # create dict for dataset creation
         dataset_dict = {"input_ids": tokenized_cells}
         if self.custom_attr_name_dict is not None:
@@ -205,10 +318,10 @@ class TranscriptomeTokenizer:
 
         # truncate dataset
         def truncate(example):
-            example["input_ids"] = example["input_ids"][0:2048]
+            example["input_ids"] = example["input_ids"][0:self.embedding_size]
             return example
 
-        output_dataset_truncated = output_dataset.map(truncate, num_proc=self.nproc)
+        output_dataset_truncated = output_dataset.map(truncate, num_proc=nproc)
 
         # measure lengths of dataset
         def measure_length(example):
@@ -216,7 +329,7 @@ class TranscriptomeTokenizer:
             return example
 
         output_dataset_truncated_w_length = output_dataset_truncated.map(
-            measure_length, num_proc=self.nproc
+            measure_length, num_proc=nproc
         )
 
         return output_dataset_truncated_w_length
@@ -227,31 +340,10 @@ def parse_args():
             "Tokenize cell data based on expression values")
     parser.add_argument("--tdigests", "-t", required=True, 
                         type=argparse.FileType('r'))
-    parser.add_argument("--loom", "-l", required=True 
+    parser.add_argument("--loom", "-l", required=True,
                         type=argparse.FileType('r'))
-    parser.add_argument("--token_dict", "-t", required=True 
+    parser.add_argument("--token_dict", "-t", required=True,
                         type=argparse.FileType('r'))
-    parser.add_argument("--output", "-o", required=True 
+    parser.add_argument("--output", "-o", required=True,
                         type=argparse.FileType('w'))
     return parser.parse_args()
-
-
-def main():
-    loom = sys.argv[1]
-
-    with open(args.tdigests, "rb") as fp:
-        tdigests = pickle.load(fp"""
-Geneformer tokenizer.
-
-Input data:
-Required format: raw counts scRNAseq data without feature selection as .loom file
-Required row (gene) attribute: "ensembl_id"; Ensembl ID for each gene
-Required col (cell) attribute: "n_counts"; total read counts in that cell
-Optional col (cell) attribute: "filter_pass"; binary indicator of whether cell should be tokenized based on user-defined filtering criteria
-Optional col (cell) attributes: any other cell metadata can be passed on to the tokenized dataset as a custom attribute dictionary as shown below
-
-Usage:
-  from geneformer import TranscriptomeTokenizer
-  tk = TranscriptomeTokenizer({"cell_type": "cell_type", "organ_major": "organ_major"}, nproc=4)
-  tk.tokenize_data("loom_data_directory", "output_directory", "output_prefix")
-"""
