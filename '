@@ -264,6 +264,7 @@ class TranscriptomeTokenizer:
 
         return cdf, token
 
+
     def _tokenize_cell(
             self,
             cell_data: np.ndarray, 
@@ -310,7 +311,7 @@ class TranscriptomeTokenizer:
         # Sort tokens by descending cdf expression
         sorted_gene_tokens = gene_tokens[sorted_indices]
         # Return truncated gene_tokens to match max model input size
-        return sorted_gene_tokens # sorted_gene_tokens[:self.embedding_size]
+        return sorted_gene_tokens[:self.embedding_size]
 
     @ray.remote
     def tokenize_file(self, loom_file_path: Path) -> list:
@@ -324,11 +325,13 @@ class TranscriptomeTokenizer:
         with lp.connect(str(loom_file_path)) as data:
             genes = np.array(data.ra.var_names)
             cells = np.array(data.ca.obs_names)
-
-            # Tokenize each cell in .loom file
+            idx = 0
             for idx, cell in enumerate(tqdm(cells, desc=tqdm_desc)):
                 cell_data = data[:, idx]
                 tokenized_cells.append(self._tokenize_cell(cell_data, genes))
+                idx += 1
+                if idx > 10:
+                    break
 
                 # # add custom attributes for subview to dict
                 # if self.custom_attr_name_dict is not None:
@@ -386,11 +389,6 @@ class TranscriptomeTokenizer:
         Parameters
         ----------
         """
-
-        def truncate(example):
-            example["input_ids"] = example["input_ids"][0:self.embedding_size]
-            return example
-
         def measure_length(example):
             """Measure length of example (max = `self.embedding_size`"""
             example["length"] = len(example["input_ids"])
@@ -404,9 +402,7 @@ class TranscriptomeTokenizer:
         # create dataset
         output_dataset = Dataset.from_dict(dataset_dict)
 
-        output_dataset_truncated = output_dataset.map(truncate, num_proc=nproc)
-
-        output_dataset_w_length = output_dataset_truncated.map(
+        output_dataset_w_length = output_dataset.map(
             measure_length, num_proc=nproc
         )
 
