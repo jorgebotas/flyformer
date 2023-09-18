@@ -807,7 +807,7 @@ def get_length_grouped_indices(
 
     # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
     indices = torch.randperm(len(lengths), generator=generator)
-    megabatch_size = mega_batch_mult * batch_sizeUnpicklingError: invalid load key, 'v'.
+    megabatch_size = mega_batch_mult * batch_size
     megabatches = [
         indices[i : i + megabatch_size].tolist()
         for i in range(0, len(lengths), megabatch_size)
