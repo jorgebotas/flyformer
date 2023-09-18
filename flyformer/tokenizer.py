@@ -34,7 +34,6 @@ warnings.filterwarnings("ignore", message=".*The 'nopython' keyword.*")
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-GENE_PERCENTILE_FILE = Path(__file__).parent / "gene_percentile_dictionary.pkl"
 EMBEDDING_SIZE = 2**11
 
 
