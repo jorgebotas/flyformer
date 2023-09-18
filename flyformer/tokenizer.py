@@ -401,7 +401,7 @@ class TranscriptomeTokenizer:
             tokenized_cells: list,
             cell_metadata: list,
             nproc: int = 1
-        ) -> datasets.Dataset:
+        ) -> Dataset:
         """
         Create datasets.Dataset from tokenized cells
 
