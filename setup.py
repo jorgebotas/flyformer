@@ -8,5 +8,5 @@ setup(name="flyformer",
       author="jorgebotas",
       author_email="jorgeb@bcm.edu",
       license="MIT",
-      packages=["Flyformer"],
+      packages=["flyformer"],
       zip_safe=False)
