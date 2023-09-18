@@ -259,7 +259,7 @@ class TranscriptomeTokenizer:
         percentile_cutoff = self._get_gene_percentile_cutoff(cdf)
 
         # Obtain token
-        token = self.gene_tokens.get(f"{gene}_{percentile_cutoff}", None)
+        token = self.gene_tokens.get(f"{gene}_{percentile_cutoff}", -1)
 
         return cdf, token
 
@@ -480,7 +480,7 @@ class TranscriptomeTokenizer:
 
         # Tokenize cells from files in `loom_data_directory`
         tokenized_cells = self._tokenize_files(loom_data_directory)
-        cell_metadata = None
+        cell_metadata = []
 
         # Create dataset
         tokenized_dataset = self._create_dataset(tokenized_cells,

@@ -36,8 +36,6 @@ from transformers.utils import is_tf_available, is_torch_available, logging,\
                                to_py_obj
 from transformers.utils.generic import _is_tensorflow, _is_torch
 
-from .tokenizer import TOKEN_DICTIONARY_FILE
-
 logger = logging.get_logger(__name__)
 EncodedInput = List[int]
 
@@ -58,9 +56,6 @@ else:
 _is_torch_generator_available = False
 if version.parse(torch.__version__) >= version.parse("1.6"):
     _is_torch_generator_available = True
-
-with open(TOKEN_DICTIONARY_FILE, "rb") as f:
-    token_dictionary = pickle.load(f)
 
 
 class ExplicitEnum(Enum):
