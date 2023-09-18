@@ -24,7 +24,7 @@ from transformers import (
     SpecialTokensMixin,
     Trainer,
 )
-from transformers.file_utils import is_datasets_available, 
+from transformers.file_utils import is_datasets_available,\
                                     is_sagemaker_dp_enabled
 from transformers.trainer_pt_utils import (
     DistributedLengthGroupedSampler,
@@ -32,7 +32,7 @@ from transformers.trainer_pt_utils import (
     LengthGroupedSampler,
 )
 from transformers.training_args import ParallelMode
-from transformers.utils import is_tf_available, is_torch_available, logging, 
+from transformers.utils import is_tf_available, is_torch_available, logging,\
                                to_py_obj
 from transformers.utils.generic import _is_tensorflow, _is_torch
 
@@ -117,7 +117,7 @@ class FlyformerPreCollator(SpecialTokensMixin):
         
         super().__init__(mask_token = "<mask>", pad_token = "<pad>")
         
-        self.token_dictionary = kwargs.get("token_dictionary")
+        self.token_dictionary = dict(kwargs.get("token_dictionary", {}))
         # self.mask_token = "<mask>"
         # self.mask_token_id = self.token_dictionary.get("<mask>")
         # self.pad_token = "<pad>"

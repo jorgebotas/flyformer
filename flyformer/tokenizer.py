@@ -24,7 +24,6 @@ import numpy as np
 from pathlib import Path
 import pickle
 import ray
-from tdigest import TDigest
 from tqdm import tqdm
 from typing import Tuple
 import warnings
@@ -77,7 +76,7 @@ class TranscriptomeTokenizer:
         nproc : int
             Number of processes to use for dataset mapping.
         gene_tdigest_file : Path
-            Path to pickle file containing dictionary of TDigest(s) of
+            Path to pickle file containing dictionary of tdigest.TDigest(s) of
             gene expression based on whole flyformer-corpus. The gene
             percentile dictionary will be created based on this object.
             { gene: <TDigest> ... }
@@ -481,7 +480,7 @@ class TranscriptomeTokenizer:
 
         # Tokenize cells from files in `loom_data_directory`
         tokenized_cells = self._tokenize_files(loom_data_directory)
-        metadata = None
+        cell_metadata = None
 
         # Create dataset
         tokenized_dataset = self._create_dataset(tokenized_cells,
