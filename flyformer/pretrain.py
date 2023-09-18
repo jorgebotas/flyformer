@@ -3,6 +3,19 @@
 
 # TRANSFOMERS VERSION 4.6.0
 
+"""
+Flyformer pretrainer.
+
+Run using docker-compose via `jorgebotas/flyformer-docker``
+Environment variables defined in Dockerfile
+
+ROOT_DIR: project directory. Should mount input dir. See `docker-compose.yaml`
+DATA_DIR: pretraining data directory. Includes .dataset (see
+          `flyformer.data_preprocessing` and `flyformer.tokenizer`
+          for more information).
+
+"""
+
 # ----- IMPORTS ----------------------------------------------------------------
 from collections import namedtuple
 import datetime
@@ -26,7 +39,7 @@ print([torch.cuda.device(i) for i in range(torch.cuda.device_count())])
 # ----- HELPER FUNCTIONS -------------------------------------------------------
 def path(*args: str) -> Path:
     """Return relative path to root directory"""
-    return os.path.join(ROOT_DIR, *args)
+    return Path(os.path.join(ROOT_DIR, *args))
 
 def get_run_name(timezone: str = "US/Eastern") -> str:
     """Return run name with datestamp, model and training parameters"""
@@ -55,14 +68,20 @@ def get_run_name(timezone: str = "US/Eastern") -> str:
     run += f"WU-{get_training('warmup_steps')}"
     return run
 
+def read_pickle(path: Path) -> dict:
+    """Read .pickle file from path"""
+    with open(path, "rb") as fp:
+        return pickle.load(fp)
+
 
 # ----- GLOBAL VARIABLES -------------------------------------------------------
 # Defined in Dockerfile
 
 # Directories
-ROOT_DIR = os.environ["ROOT_DIR"]
-# INPUT_DIR = os.environ["INPUT_DIR"]
-GENECORPUS_DIR = os.path.join(ROOT_DIR, "input")
+ROOT_DIR = Path(os.environ["ROOT_DIR"])
+# Directory containing .dataset (Apache Arrow format), example lengths and
+# token dictionary
+DATA_DIR = ROOT_DIR / "input"
 
 # Seeds
 RANDOM_SEED = int(os.environ["RANDOM_SEED"])
@@ -73,19 +92,18 @@ torch.manual_seed(TORCH_SEED)
 torch.cuda.manual_seed_all(TORCH_SEED)
 
 # Set logging preferences
-logging.enable_default_handler() 
+logging.enable_default_handler()
 logging.set_verbosity(logging.DEBUG)
 
 # Load token dictionary
-with open(path("Geneformer/geneformer/token_dictionary.pkl"), "rb") as pkl:
-    TOKEN_DICT = pickle.load(pkl)
-print(len(TOKEN_DICT.keys()))
+TOKEN_DICT = read_pickle(DATA_DIR / "token_dictionary.pickle")
+
 
 # ----- LOAD DATASET -----------------------------------------------------------
 print("> Loading dataset...")
-# dataset = load_from_disk(path("drosophilacorpus_2M_2048.dataset"))
-dataset = load_from_disk(path(GENECORPUS_DIR, "genecorpus_30M_2048.dataset"))
+dataset = load_from_disk(next(DATA_DIR.glob("*.dataset"))
 print(f"> {dataset.num_rows} examples loaded")
+
 
 # ----- MODEL PARAMETERS -------------------------------------------------------
 # Define (BERT) model parameters
@@ -116,12 +134,12 @@ MODEL_PARAMETERS = {
     "hidden_dropout_prob": 0.02, # BERT default = 0.1
     # The dropout ratio for the attention probabilities
     "attention_probs_dropout_prob": 0.02, # BERT default = 0.1
-    # The standard deviation of the truncated_normal_initializer 
+    # The standard deviation of the truncated_normal_initializer
     # for initializing all weight matrices
     "initializer_range": 0.02, # BERT default 0.02
     # The epsilon used by the layer normalization layers
     "layer_norm_eps": 1e-12, # BERT default 1e-12
-    # Use gradient checkpointing to save memory at the expense of slower 
+    # Use gradient checkpointing to save memory at the expense of slower
     # backward pass
     "gradient_checkpointing": False, # BERT default = False
 }
@@ -140,7 +158,7 @@ TRAINING_PARAMETERS = {
     "lr_scheduler_type": "linear", # BERT default = "linear"
     # Number of steps used for a linear warmup from 0 to learning_rate
     "warmup_steps": 10_000,
-    # Weight decay applied (if not zero) to all layers except all bias and 
+    # Weight decay applied (if not zero) to all layers except all bias and
     # LayerNorm weights in AdamW optimizer.
     "weight_decay": 1e-3, # BERT default = 0
     # The batch size per GPU/TPU/MPS/NPU core/CPU for training
@@ -154,7 +172,7 @@ TRAINING_PARAMETERS = {
     "save_steps": np.floor((dataset.num_rows / batch_size) / n_saves_epoch),
     # Number of update steps between two logs
     "logging_steps": 10, # 1000
-    # Group together samples of roughly the same length in the training dataset 
+    # Group together samples of roughly the same length in the training dataset
     # (to minimize padding applied and be more efficient). Dynamic padding
     "group_by_length": True, # BERT default = False
     "length_column_name": "length", # BERT default = "length"
@@ -191,8 +209,7 @@ pretrainer = GeneformerPretrainer(
                            logging_dir=logging_dir,
                            **TRAINING_PARAMETERS),
     train_dataset=dataset,
-    example_lengths_file=path(GENECORPUS_DIR, 
-                              "genecorpus_30M_2048_sorted_lengths.pkl"),
+    example_lengths_file=next(DATA_DIR.glob("*lengths.pickle")),
     token_dictionary=TOKEN_DICT,
 )
 # Pretraining

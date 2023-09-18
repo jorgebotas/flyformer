@@ -10,9 +10,10 @@ tokenized dataset as a custom attribute dictionary as shown below
 
 Usage:
   from flyformer import TranscriptomeTokenizer
-  tk = TranscriptomeTokenizer({"cell_type": "cell_type", 
+  tk = TranscriptomeTokenizer({"cell_type": "cell_type",
                                "organ_major": "organ_major"})
   tk.tokenize_data("loom_data_directory", "output_directory", "output_prefix")
+
 """
 
 import argparse
@@ -60,7 +61,7 @@ class TranscriptomeTokenizer:
             gene_tdigest_file: Path = None,
             gene_approx_cdf_file: Path = None,
             gene_approx_cdf_nsample: int = 1001,
-            gene_percentile_cutoffs: np.ndarray = np.array([ 10, 25, 75, 
+            gene_percentile_cutoffs: np.ndarray = np.array([ 10, 25, 75,
                                                              90, 100 ]),
             embedding_size: int = EMBEDDING_SIZE,
             custom_attr_name_dict: dict = None,
@@ -83,7 +84,7 @@ class TranscriptomeTokenizer:
             { gene: <TDigest> ... }
         gene_approx_cdf_file : Path
             Path to pickle file containing dictionary with approximations of
-            gene expression values in TDigest(s) computed on whole 
+            gene expression values in TDigest(s) computed on whole
             flyformer-corpus. Gene tokenization will be based on this object.
             { gene: <np.array> ... }
         embedding_size: int
@@ -122,14 +123,14 @@ class TranscriptomeTokenizer:
         # Model input size (embedding)
         self.embedding_size = embedding_size
 
-        # dictionary of custom attributes 
+        # dictionary of custom attributes
         # {output dataset column name: input .loom column name}
         self.custom_attr_name_dict = custom_attr_name_dict
 
         # # gene keys for full vocabulary
         # gene_keys = list(self.gene_percentiles.keys())
 
-        # # protein-coding and miRNA gene list dictionary for 
+        # # protein-coding and miRNA gene list dictionary for
         # # selecting .loom rows for tokenization
         # self.genelist_dict = dict(zip(gene_keys, [True] * len(gene_keys)))
 
@@ -150,9 +151,9 @@ class TranscriptomeTokenizer:
         Returns
         ----------
         gene_approximated_cdfs: dict
-            Dictionary containing an np.ndarray for each gene with an 
+            Dictionary containing an np.ndarray for each gene with an
             approximation of the gene's expression distribution in the TDigest.
-            { genename: <np.ndarray> } 
+            { genename: <np.ndarray> }
             where len(np.ndarray) = self.gene_approx_cdf_nsample (odd number)
         """
         # Make sure `self.gene_approx_cdf_nsample` is an odd number to include
@@ -165,8 +166,8 @@ class TranscriptomeTokenizer:
 
         tqdm_desc = f"CDF approximation (n={self.gene_approx_cdf_nsample})"
         gene_approximated_cdfs = {
-            gene: np.array([ 
-                tdigest.percentile(i * factor) 
+            gene: np.array([
+                tdigest.percentile(i * factor)
                 for i in range(self.gene_approx_cdf_nsample)
             ]) for gene, tdigest in tqdm(gene_tdigests.items(), desc=tqdm_desc)
         }
@@ -201,7 +202,7 @@ class TranscriptomeTokenizer:
     def _approximate_gene_cdf(self, gene: str, expression: float) -> float:
         """
         Approximate TDigest.cdf() to optimize tokenization
-        `self.gene_approx_cdfs` contains approximated CDFs based on with 
+        `self.gene_approx_cdfs` contains approximated CDFs based on with
         resolution `self.gene_approx_cdf_nsample`
 
         Parameters
@@ -229,13 +230,13 @@ class TranscriptomeTokenizer:
         return cdf
 
     def _tokenize_gene(
-            self, 
+            self,
             gene: str,
             expression: float
         ) -> Tuple[float, float]:
         """
         Return expression CDF value approximated from gene's expression data
-        stored in TDigest and gene token (based on cdf and 
+        stored in TDigest and gene token (based on cdf and
         `self.gene_percentile_cutoffs`)
 
         Parameters
@@ -251,7 +252,7 @@ class TranscriptomeTokenizer:
             Cumulative Distribution Function value associated to gene
             expression when compared to whole corpus (TDigest)
         token: int
-            Token associated to gene and expression level (based on 
+            Token associated to gene and expression level (based on
             `self.gene_percentile_cutoffs`). See `self.gene_tokens`
         """
         # Obtain approximate CDF (0-100)
@@ -266,13 +267,13 @@ class TranscriptomeTokenizer:
 
     def _tokenize_cell(
             self,
-            cell_data: np.ndarray, 
+            cell_data: np.ndarray,
             genes: np.ndarray
         ) -> np.ndarray:
         """
-        Converts normalized gene expression vector to tokenized rank value 
+        Converts normalized gene expression vector to tokenized rank value
         encoding.Relative gene expression value is calculated based
-        on gene's approximated cdf obtained from TDigest. 
+        on gene's approximated cdf obtained from TDigest.
             e.g. 0.93 cdf > 0.81 cdf > 0.13 cdf
 
         Parameters
@@ -293,13 +294,13 @@ class TranscriptomeTokenizer:
         nonzero_mask = cell_data > 0
         nonzero_genes = genes[nonzero_mask]
         nonzero_expression = cell_data[nonzero_mask]
-        
+
         # Tokenize each gene with non-zero expression in cell data
         cdf_expression, gene_tokens = zip(*[
             self._tokenize_gene(gene, expr)
                 for gene, expr in zip(nonzero_genes, nonzero_expression)
         ])
-        
+
         # Convert to np.ndarray
         cdf_expression = np.array(cdf_expression)
         gene_tokens = np.array(gene_tokens)
@@ -316,7 +317,7 @@ class TranscriptomeTokenizer:
     def _tokenize_file(self, loom_file_path: Path) -> list:
         """
         Tokenize single cell gene expression data from preprocessed loom file
-        See `flyformer.data_preprocessing` to properly format .loom files PRIOR 
+        See `flyformer.data_preprocessing` to properly format .loom files PRIOR
         to tokenization. File tokenization is parallelized using Ray.
 
         Call `self._tokenize_file.remote(...)`
@@ -374,7 +375,7 @@ class TranscriptomeTokenizer:
             Matrix containing tokenized cells
         """
         loom_files = list(Path(loom_data_directory).glob("*.loom"))
-        
+
         if len(loom_files) == 0:
             logger.error(
                 f"No .loom files found in directory {loom_data_directory}.")
@@ -495,7 +496,7 @@ class TranscriptomeTokenizer:
 def parse_args():
     parser = argparse.ArgumentParser(
             "Tokenize cell data based on expression values")
-    parser.add_argument("--tdigests", "-t", required=True, 
+    parser.add_argument("--tdigests", "-t", required=True,
                         type=argparse.FileType('r'))
     parser.add_argument("--loom", "-l", required=True,
                         type=argparse.FileType('r'))
