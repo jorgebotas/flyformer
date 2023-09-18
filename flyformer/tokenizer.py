@@ -313,7 +313,24 @@ class TranscriptomeTokenizer:
         return sorted_gene_tokens # sorted_gene_tokens[:self.embedding_size]
 
     @ray.remote
-    def tokenize_file(self, loom_file_path: Path) -> list:
+    def _tokenize_file(self, loom_file_path: Path) -> list:
+        """
+        Tokenize single cell gene expression data from preprocessed loom file
+        See `flyformer.data_preprocessing` to properly format .loom files PRIOR 
+        to tokenization. File tokenization is parallelized using Ray.
+
+        Call `self._tokenize_file.remote(...)`
+
+        Parameters
+        ----------
+        loom_file_path: Path
+            Path to preprocessed loom file
+
+        Returns
+        ----------
+        tokenized_cells: list
+            Matrix containing tokenized cells in `loom_file_path`
+        """
         # if self.custom_attr_name_dict is not None:
             # file_cell_metadata = {
                 # attr_key: [] for attr_key in self.custom_attr_name_dict.keys()
@@ -339,7 +356,7 @@ class TranscriptomeTokenizer:
 
         return tokenized_cells #, file_cell_metadata
 
-    def tokenize_files(self, loom_data_directory: Path) -> list:
+    def _tokenize_files(self, loom_data_directory: Path) -> list:
         """
         Tokenize single cell gene expression data from a collection of
         preprocessed loom files contained in `loom_data_directory`. See
@@ -371,7 +388,7 @@ class TranscriptomeTokenizer:
 
         # Loop through directories to tokenize .loom files in parallel (Ray)
         for file_tokenized_cells in ray.get([
-                self.tokenize_file.remote(self, path) for path in loom_files
+                self._tokenize_file.remote(self, path) for path in loom_files
             ]):
             tokenized_cells += file_tokenized_cells
 
@@ -380,11 +397,30 @@ class TranscriptomeTokenizer:
 
         return tokenized_cells
 
-    def create_dataset(self, tokenized_cells, cell_metadata, nproc=1):
+    def _create_dataset(self,
+            tokenized_cells: list,
+            cell_metadata: list,
+            nproc: int = 1
+        ) -> datasets.Dataset:
         """
+        Create datasets.Dataset from tokenized cells
 
         Parameters
         ----------
+        tokenized_cells: list
+            Matrix of tokenized cells. Each cell is represented as a set of
+            `self.gene_tokens` sorted in decreasing order or relative
+            expression across data corpus.
+        cell_metadata: list
+            Metadata associated to each cell. E.g. cell-type, organ,...
+        nproc: int
+            Number of processors used for .dataset formatting (truncating and
+            calculating example length)
+
+        Returns
+        ----------
+        dataset: datasets.Dataset
+            Dataset containing tokenized cells
         """
 
         def truncate(example):
@@ -411,6 +447,49 @@ class TranscriptomeTokenizer:
         )
 
         return output_dataset_w_length
+
+    def tokenize_data(self,
+            loom_data_directory: Path,
+            output_directory: Path,
+            output_prefix: str,
+            nproc: int = 1,
+        ) -> None:
+        """
+        Tokenize single cell gene expression data from a collection of
+        preprocessed .loom files contained in `loom_data_directory`. See
+        `flyformer.data_preprocessing` to properly format .loom files PRIOR to
+        tokenization. File tokenization is parallelized using Ray.
+
+        Tokenized single cell gene expression data will be saved as .dataset in
+        `output_directory` (Apache Arrow format)
+
+        Parameters
+        ----------
+        loom_data_directory : Path
+            Path to directory containing loom files
+        output_directory : Path
+            Path to directory where tokenized data will be saved as .dataset
+        output_prefix : str
+            Prefix for output .dataset
+        nproc: int
+            Number of processors used for .dataset formatting (truncating and
+            calculating example length)
+        """
+        loom_data_directory = Path(loom_data_directory)
+        output_directory = Path(output_directory)
+        output_path = output_directory / output_prefix
+
+        # Tokenize cells from files in `loom_data_directory`
+        tokenized_cells = self._tokenize_files(loom_data_directory)
+        metadata = None
+
+        # Create dataset
+        tokenized_dataset = self._create_dataset(tokenized_cells,
+                                                 cell_metadata,
+                                                 nproc=nproc)
+
+        # Save dataset to disk
+        tokenized_dataset.save_to_disk(output_path.with_suffix(".dataset"))
 
 
 def parse_args():
