@@ -509,7 +509,7 @@ class AbstractTranscriptomeTokenizer(ABCMeta):
         return tokenized_dataset
 
 @inherit_doc
-class ExpressionAsNounTokenizer(AbstractTranscriptomeTokenizer):
+class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
     """
     Represent gene expression as a single token "<gene>_<quantile_expr_cutoff>"
     """
