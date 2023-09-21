@@ -26,7 +26,7 @@ import os
 from pathlib import Path
 import ray
 from tqdm import tqdm
-from typing import Union
+from typing import Optional, Union
 import warnings
 
 from .helper import read_pickle, write_pickle
@@ -43,13 +43,13 @@ EMBEDDING_SIZE = 2**11
 class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
     def __init__(
             self,
-            gene_tdigest_file: Path = None,
-            gene_approx_cdf_file: Path = None,
+            gene_tdigest_file: Optional[Path] = None,
+            gene_approx_cdf_file: Optional[Path] = None,
             gene_approx_cdf_nsample: int = 1001,
             gene_quantile_cutoffs: np.ndarray = np.array([ 10, 25, 75,
                                                            90, 100 ]),
             embedding_size: int = EMBEDDING_SIZE,
-            custom_attr_name_dict: dict = None,
+            custom_attr_name_dict: Optional[dict] = None,
         ) -> None:
         """
         Initialize tokenizer.
