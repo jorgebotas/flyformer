@@ -26,10 +26,10 @@ import os
 from pathlib import Path
 import ray
 from tqdm import tqdm
-from typing import Tuple, Union
+from typing import Union
 import warnings
 
-from .helper import inherti_doc, read_pickle, write_pickle
+from .helper import read_pickle, write_pickle
 
 warnings.filterwarnings("ignore", message=".*The 'nopython' keyword.*")
 
@@ -40,7 +40,7 @@ EMBEDDING_SIZE = 2**11
 
 
 # Tokenizer abstract class
-class AbstractTranscriptomeTokenizer(ABCMeta):
+class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
     def __init__(
             self,
             gene_tdigest_file: Path = None,
@@ -164,7 +164,7 @@ class AbstractTranscriptomeTokenizer(ABCMeta):
         Fills self.tokens with data from self._approximate_gene_cdfs
         and self.gene_quantiles
         """
-        return
+        pass
 
     def _get_gene_expr_quantile(self, gene: str, expression: float) -> float:
         """
@@ -217,14 +217,14 @@ class AbstractTranscriptomeTokenizer(ABCMeta):
             self,
             gene: str,
             quantile_cutoff: int
-        ) -> Union[int, Tuple[int, ...]]:
-        return
+        ) -> Union[int, tuple[int, ...]]:
+        pass
 
     def _tokenize_gene(
             self,
             gene: str,
             expression: float
-        ) -> Tuple[float, Union[int, Tuple[int, ...]]:
+        ) -> tuple[float, Union[int, tuple[int, ...]]]:
         """
         Return gene expression quantile and gene token(s).
         Quantile is relative to Cumulative  Distribution Function (CDF) 
@@ -242,7 +242,7 @@ class AbstractTranscriptomeTokenizer(ABCMeta):
         quantile: float
             Quantile in approximated CDF,
             associated to gene expression when compared to whole corpus.
-        token: Union[int, Tuple[int, ...]
+        token: Union[int, tuple[int, ...]
             Token associated to gene and expression level (based on
             `self.gene_quantile_cutoffs`). See `self.tokens`
             The value could be either a single token (int) or a tuple of tokens
@@ -508,7 +508,6 @@ class AbstractTranscriptomeTokenizer(ABCMeta):
 
         return tokenized_dataset
 
-@inherit_doc
 class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
     """
     Represent gene expression as a single token "<gene>_<quantile_expr_cutoff>"
@@ -532,7 +531,6 @@ class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
 
         return token
 
-@inherit_doc
 class ExpressionAsAdjectiveTokenizer(AbstractTranscriptomeTokenizer):
     """
     Represent gene expression as a two linked tokens (adjective = expression,
@@ -543,7 +541,7 @@ class ExpressionAsAdjectiveTokenizer(AbstractTranscriptomeTokenizer):
             self,
             gene: str,
             quantile_cutoff: int
-        ) -> Tuple[int, ...]:
+        ) -> tuple[int, ...]:
         
         quantile_token = self.tokens.get(quantile_cutoff)
         gene_token = self.tokens.get(gene)

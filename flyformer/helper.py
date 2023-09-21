@@ -1,33 +1,8 @@
+from pathlib import Path
 import pickle
 from types import FunctionType
+from typing import Union
 
-def inherit_doc(cls: class) -> class:
-    """
-    Decorator function to make all concrete methods of subclasses inherit
-    docstring from parent's methods, if docstring is not specified.
-
-    @inherit_doc
-    class Class:
-        def method
-            ...
-        ...
-    Parameters
-    ----------
-    cls: class
-
-    Returns
-    ----------
-    cls: class
-        Class with "ammended" docstrings
-    """
-    for name, func in vars(cls).items():
-        if isinstance(func, FunctionType) and not func.__doc__:
-            for parent in cls.__bases__:
-                parfunc = getattr(parent, name, None)
-                if parfunc and getattr(parfunc, '__doc__', None):
-                    func.__doc__ = parfunc.__doc__
-                    break
-    return cls
 
 def read_pickle(path: Path) -> dict:
     """

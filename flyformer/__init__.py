@@ -1,2 +1,2 @@
-from .tokenizer import TranscriptomeTokenizer
+from .tokenizer import ExpressionCombinedTokenizer, ExpressionAsAdjectiveTokenizer
 from .pretrainer import FlyformerPretrainer

@@ -1,7 +1,7 @@
 """
 Flyformer precollator and pretrainer.
 
-Huggingface data collator and trainer modified to accommodate single-cell 
+Huggingface data collator and trainer modified to accommodate single-cell
 transcriptomics data.
 
 """
@@ -42,11 +42,11 @@ EncodedInput = List[int]
 # Used to set the max input length for a model with infinite size input
 VERY_LARGE_INTEGER = int(
     1e30
-) 
+)
 
 LARGE_INTEGER = int(
     1e20
-)  
+)
 
 if is_sagemaker_dp_enabled():
     import smdistributed.dataparallel.torch.distributed as dist
@@ -76,8 +76,8 @@ class ExplicitEnum(Enum):
 
 class TruncationStrategy(ExplicitEnum):
     """
-    Possible values for the ``truncation`` argument in 
-    :meth:`PreTrainedTokenizerBase.__call__`. Useful for tab-completion in an 
+    Possible values for the ``truncation`` argument in
+    :meth:`PreTrainedTokenizerBase.__call__`. Useful for tab-completion in an
     IDE.
     """
 
@@ -112,9 +112,9 @@ class TensorType(ExplicitEnum):
 
 class FlyformerPreCollator(SpecialTokensMixin):
     def __init__(self, *args, **kwargs) -> None:
-        
+
         super().__init__(mask_token = "<mask>", pad_token = "<pad>")
-        
+
         self.token_dictionary = dict(kwargs.get("token_dictionary", {}))
         # self.mask_token = "<mask>"
         # self.mask_token_id = self.token_dictionary.get("<mask>")
@@ -126,7 +126,7 @@ class FlyformerPreCollator(SpecialTokensMixin):
         #     self.token_dictionary.get("<pad>"),
         # ]
         self.model_input_names = ["input_ids"]
-    
+
     def convert_ids_to_tokens(self,value):
         return self.token_dictionary.get(value)
 
@@ -397,7 +397,7 @@ class FlyformerPreCollator(SpecialTokensMixin):
 
             for key, value in encoded_inputs.items():
                 encoded_inputs[key] = to_py_obj(value)
-                
+
 
         # Convert padding_strategy in PaddingStrategy
         padding_strategy, _, max_length, _ = self._get_padding_truncation_strategies(
@@ -763,7 +763,7 @@ class CustomDistributedLengthGroupedSampler(DistributedLengthGroupedSampler):
         # Deterministically shuffle based on epoch and seed
         g = torch.Generator()
         g.manual_seed(self.seed + self.epoch)
-        
+
         indices = get_length_grouped_indices(self.lengths, self.batch_size, generator=g)
 
         if not self.drop_last:
