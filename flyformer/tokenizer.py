@@ -16,17 +16,20 @@ Usage:
 
 """
 
+from abc import ABCMeta, abstractmethod
 import argparse
 from datasets import Dataset
 import loompy as lp
 import logging
 import numpy as np
+import os
 from pathlib import Path
-import pickle
 import ray
 from tqdm import tqdm
-from typing import Tuple
+from typing import Tuple, Union
 import warnings
+
+from .helper import inherti_doc, read_pickle, write_pickle
 
 warnings.filterwarnings("ignore", message=".*The 'nopython' keyword.*")
 
@@ -36,31 +39,15 @@ logger.setLevel(logging.INFO)
 EMBEDDING_SIZE = 2**11
 
 
-def read_pickle(path: Path) -> dict:
-    """
-    Read pickle file and returns dictionary. Pickle file might be chunked
-    path: Path
-        Path to pickle file
-    Returns: dictionary containing content in pickle file
-    """
-    dictionary = {}
-    with open(path, "rb") as fp:
-        while True:
-            try:
-                dictionary.update(pickle.load(fp))
-            except EOFError:
-                break
-        return dictionary
-
-
-class TranscriptomeTokenizer:
+# Tokenizer abstract class
+class AbstractTranscriptomeTokenizer(ABCMeta):
     def __init__(
             self,
             gene_tdigest_file: Path = None,
             gene_approx_cdf_file: Path = None,
             gene_approx_cdf_nsample: int = 1001,
-            gene_percentile_cutoffs: np.ndarray = np.array([ 10, 25, 75,
-                                                             90, 100 ]),
+            gene_quantile_cutoffs: np.ndarray = np.array([ 10, 25, 75,
+                                                           90, 100 ]),
             embedding_size: int = EMBEDDING_SIZE,
             custom_attr_name_dict: dict = None,
         ) -> None:
@@ -78,7 +65,7 @@ class TranscriptomeTokenizer:
         gene_tdigest_file : Path
             Path to pickle file containing dictionary of tdigest.TDigest(s) of
             gene expression based on whole flyformer-corpus. The gene
-            percentile dictionary will be created based on this object.
+            quantile dictionary will be created based on this object.
             { gene: <TDigest> ... }
         gene_approx_cdf_file : Path
             Path to pickle file containing dictionary with approximations of
@@ -89,8 +76,8 @@ class TranscriptomeTokenizer:
             LLM model input size (embedding size). Default 2^11 = 2048
             Cell embeddings will be truncated if it exceeds this number
         """
-        # percentile cutoffs
-        self.gene_percentile_cutoffs = np.array(gene_percentile_cutoffs)
+        # quantile cutoffs
+        self.gene_quantile_cutoffs = np.array(gene_quantile_cutoffs)
 
         if gene_approx_cdf_file is not None:
             print(f"Loading approximated CDFs: {gene_approx_cdf_file}")
@@ -114,9 +101,9 @@ class TranscriptomeTokenizer:
                     n = {self.gene_approx_cdf_nsample}")
             self.gene_approx_cdfs = self._approximate_gene_cdfs(gene_tdigests)
 
-        self.gene_tokens = { "<pad>": 0, "<mask>": 1 }
+        self.tokens = { "<pad>": 0, "<mask>": 1 }
         self._fill_gene_tokens()
-        print(f"Vocabulary size: {len(self.gene_tokens.keys())}")
+        print(f"Vocabulary size: {len(self.tokens.keys())}")
 
         # Model input size (embedding)
         self.embedding_size = embedding_size
@@ -126,7 +113,7 @@ class TranscriptomeTokenizer:
         self.custom_attr_name_dict = custom_attr_name_dict
 
         # # gene keys for full vocabulary
-        # gene_keys = list(self.gene_percentiles.keys())
+        # gene_keys = list(self.gene_quantiles.keys())
 
         # # protein-coding and miRNA gene list dictionary for
         # # selecting .loom rows for tokenization
@@ -138,7 +125,7 @@ class TranscriptomeTokenizer:
         """
         Compute gene approximate CDF based on tdigest file. Sample each gene
         expression distribution `self.gene_approx_cdf_nsample` times, equally
-        interspered from 0 to 100th percentile (inclusive)
+        interspered from 0 to 100th quantile (inclusive)
 
         Parameters
         ----------
@@ -148,7 +135,7 @@ class TranscriptomeTokenizer:
 
         Returns
         ----------
-        gene_approximated_cdfs: dict
+        gene_approx_cdfs: dict
             Dictionary containing an np.ndarray for each gene with an
             approximation of the gene's expression distribution in the TDigest.
             { genename: <np.ndarray> }
@@ -159,49 +146,31 @@ class TranscriptomeTokenizer:
         if self.gene_approx_cdf_nsample % 2 == 0:
             self.gene_approx_cdf_nsample += 1
 
-        # Converts to percentile (input of `TDigest.percentile()`)
+        # Converts to quantile (input of `TDigest.quantile()`)
         factor = 100 / (self.gene_approx_cdf_nsample - 1)
 
         tqdm_desc = f"CDF approximation (n={self.gene_approx_cdf_nsample})"
-        gene_approximated_cdfs = {
+        gene_approx_cdfs = {
             gene: np.array([
-                tdigest.percentile(i * factor)
+                tdigest.quantile(i * factor)
                 for i in range(self.gene_approx_cdf_nsample)
             ]) for gene, tdigest in tqdm(gene_tdigests.items(), desc=tqdm_desc)
         }
-        print(len(list(gene_approx_cdfs.values())[0]))
-        return gene_approximated_cdfs
+        return gene_approx_cdfs
 
+    @abstractmethod
     def _fill_gene_tokens(self) -> None:
-        """Fills self.gene_tokens with data from self.gene_percentiles"""
-        idx = len(self.gene_tokens.keys())
-        for gene in self.gene_approx_cdfs.keys():
-            for percentile in self.gene_percentile_cutoffs:
-                self.gene_tokens[f"{gene}_{percentile}"] = idx
-                idx += 1
-
-    def _get_gene_percentile_cutoff(self, cdf: float) -> int:
         """
-        Retrieve percentile cutoff associated to CDF
-
-        Parameters
-        ----------
-        cdf: float
-            CDF value corresponding to log1p gene expression of interest
-
-        Returns
-        ----------
-        percentile_cutoff: int
-            Percentile cut-off greater or equal to provided `cdf`
+        Fills self.tokens with data from self._approximate_gene_cdfs
+        and self.gene_quantiles
         """
-        idx = np.argmax(self.gene_percentile_cutoffs >= cdf * 100)
-        return self.gene_percentile_cutoffs[idx]
+        return
 
-    def _approximate_gene_cdf(self, gene: str, expression: float) -> float:
+    def _get_gene_expr_quantile(self, gene: str, expression: float) -> float:
         """
-        Approximate TDigest.cdf() to optimize tokenization
-        `self.gene_approx_cdfs` contains approximated CDFs based on with
-        resolution `self.gene_approx_cdf_nsample`
+        Approximate TDigest.cdf() to optimize tokenization.
+        `self.gene_approx_cdfs` contains approximated CDFs with
+        resolution defined by `self.gene_approx_cdf_nsample`
 
         Parameters
         ----------
@@ -212,9 +181,8 @@ class TranscriptomeTokenizer:
 
         Returns
         ----------
-        cdf: float [0, 1]
-            Approximate CDF value (analogous to TDigest.cdf(). i.e., percentile
-            associated to a provided expression value
+        expr_quantile: float [0, 1]
+            Approximate gene expression quantile (analogous to TDigest.cdf()
         """
         # gene_cdf is ordered from low to high
         gene_cdf = self.gene_approx_cdfs.get(gene, np.array([np.inf]))
@@ -223,19 +191,44 @@ class TranscriptomeTokenizer:
         cdf_idx = np.argmax(gene_cdf >= expression)
 
         # Equivalent to cdf_idx / len(gene_cdf)
-        cdf = (cdf_idx / self.gene_approx_cdf_nsample)
+        expr_quantile = (cdf_idx / self.gene_approx_cdf_nsample)
 
-        return cdf
+        return expr_quantile
+
+    def _get_gene_quantile_cutoff(self, expr_quantile: float) -> int:
+        """
+        Retrieve quantile cutoff associated to gene expression quantile
+
+        Parameters
+        ----------
+        expr_quantile: float [0, 1]
+            CDF value corresponding to log1p gene expression of interest
+
+        Returns
+        ----------
+        quantile_cutoff: int
+            Percentile cut-off greater or equal to provided `expr_quantile`
+        """
+        idx = np.argmax(self.gene_quantile_cutoffs >= expr_quantile * 100)
+        return self.gene_quantile_cutoffs[idx]
+
+    @abstractmethod
+    def _get_gene_token(
+            self,
+            gene: str,
+            quantile_cutoff: int
+        ) -> Union[int, Tuple[int, ...]]:
+        return
 
     def _tokenize_gene(
             self,
             gene: str,
             expression: float
-        ) -> Tuple[float, float]:
+        ) -> Tuple[float, Union[int, Tuple[int, ...]]:
         """
-        Return expression CDF value approximated from gene's expression data
-        stored in TDigest and gene token (based on cdf and
-        `self.gene_percentile_cutoffs`)
+        Return gene expression quantile and gene token(s).
+        Quantile is relative to Cumulative  Distribution Function (CDF) 
+        approximated from gene's expression data stored in TDigest.
 
         Parameters
         ----------
@@ -246,22 +239,25 @@ class TranscriptomeTokenizer:
 
         Returns
         ----------
-        cdf: float
-            Cumulative Distribution Function value associated to gene
-            expression when compared to whole corpus (TDigest)
-        token: int
+        quantile: float
+            Quantile in approximated CDF,
+            associated to gene expression when compared to whole corpus.
+        token: Union[int, Tuple[int, ...]
             Token associated to gene and expression level (based on
-            `self.gene_percentile_cutoffs`). See `self.gene_tokens`
+            `self.gene_quantile_cutoffs`). See `self.tokens`
+            The value could be either a single token (int) or a tuple of tokens
+            that will be flattened in the final cell's representation
         """
-        # Obtain approximate CDF (0-100)
-        cdf = self._approximate_gene_cdf(gene, expression)
+        # Obtain quantile from approximate CDF (0-100)
+        quantile = self._get_gene_expr_quantile(gene, expression)
 
-        percentile_cutoff = self._get_gene_percentile_cutoff(cdf)
+        # Obtain gene expression quantile cutoff for tokenization
+        quantile_cutoff = self._get_gene_quantile_cutoff(quantile)
 
-        # Obtain token
-        token = self.gene_tokens.get(f"{gene}_{percentile_cutoff}", -1)
+        # Obtain token from concrete class method
+        token = self._get_gene_token(gene, quantile_cutoff)
 
-        return cdf, token
+        return quantile, token
 
     def _tokenize_cell(
             self,
@@ -270,9 +266,9 @@ class TranscriptomeTokenizer:
         ) -> np.ndarray:
         """
         Converts normalized gene expression vector to tokenized rank value
-        encoding.Relative gene expression value is calculated based
-        on gene's approximated cdf obtained from TDigest.
-            e.g. 0.93 cdf > 0.81 cdf > 0.13 cdf
+        encoding. Relative gene expression value (quantile) is calculated based
+        on the gene's approximated cdf obtained from TDigest.
+            e.g. 0.93 > 0.81 > 0.13
 
         Parameters
         ----------
@@ -294,22 +290,27 @@ class TranscriptomeTokenizer:
         nonzero_expression = cell_data[nonzero_mask]
 
         # Tokenize each gene with non-zero expression in cell data
-        cdf_expression, gene_tokens = zip(*[
+        quantile_expression, gene_tokens = zip(*[
             self._tokenize_gene(gene, expr)
                 for gene, expr in zip(nonzero_genes, nonzero_expression)
         ])
 
         # Convert to np.ndarray
-        cdf_expression = np.array(cdf_expression)
+        quantile_expression = np.array(quantile_expression)
         gene_tokens = np.array(gene_tokens)
 
-        # Obtain indices from descending sorted cdf expression values
-        sorted_indices = np.argsort(-cdf_expression)
+        # Obtain indices from descending sorted quantile expression values
+        sorted_indices = np.argsort(-quantile_expression)
 
-        # Sort tokens by descending cdf expression
+        # Sort tokens by descending quantile expression
         sorted_gene_tokens = gene_tokens[sorted_indices]
-        # Return truncated gene_tokens to match max model input size
-        return sorted_gene_tokens # sorted_gene_tokens[:self.embedding_size]
+
+        # Flatten gene_tokens (row-major, C-order) to consider gene
+        # representations with more than token per gene.
+        # E.g. [ <expression_quantile_token>, <gene_name_token> ]
+        sorted_gene_tokens_flatten = sorted_gene_tokens.flatten(order="C")
+
+        return sorted_gene_tokens_flatten
 
     @ray.remote
     def _tokenize_file(self, loom_file_path: Path) -> list:
@@ -345,7 +346,6 @@ class TranscriptomeTokenizer:
             for idx, cell in enumerate(tqdm(cells, desc=tqdm_desc)):
                 cell_data = data[:, idx]
                 tokenized_cells.append(self._tokenize_cell(cell_data, genes))
-
                 # # add custom attributes for subview to dict
                 # if self.custom_attr_name_dict is not None:
                     # for k in file_cell_metadata.keys():
@@ -353,7 +353,7 @@ class TranscriptomeTokenizer:
                 # else:
                     # file_cell_metadata = None
 
-        return tokenized_cells #, file_cell_metadata
+        return tokenized_cells
 
     def _tokenize_files(self, loom_data_directory: Path) -> list:
         """
@@ -379,10 +379,12 @@ class TranscriptomeTokenizer:
                 f"No .loom files found in directory {loom_data_directory}.")
             raise
 
+        # Clean any other preexisting Ray session
+        ray.shutdown()
+
         # Initialize Ray
         ray.init()
 
-        # Will store list of tokenized cells
         tokenized_cells = []
 
         # Loop through directories to tokenize .loom files in parallel (Ray)
@@ -408,7 +410,7 @@ class TranscriptomeTokenizer:
         ----------
         tokenized_cells: list
             Matrix of tokenized cells. Each cell is represented as a set of
-            `self.gene_tokens` sorted in decreasing order or relative
+            `self.tokens` sorted in decreasing order or relative
             expression across data corpus.
         cell_metadata: list
             Metadata associated to each cell. E.g. cell-type, organ,...
@@ -450,9 +452,9 @@ class TranscriptomeTokenizer:
     def tokenize_data(self,
             loom_data_directory: Path,
             output_directory: Path,
-            output_prefix: str,
+            output_prefix: str = "dataset",
             nproc: int = 1,
-        ) -> None:
+        ) -> Dataset:
         """
         Tokenize single cell gene expression data from a collection of
         preprocessed .loom files contained in `loom_data_directory`. See
@@ -478,6 +480,9 @@ class TranscriptomeTokenizer:
         output_directory = Path(output_directory)
         output_path = output_directory / output_prefix
 
+        # Create output directory if non-existant
+        os.makedirs(output_directory, exist_ok=True)
+
         # Tokenize cells from files in `loom_data_directory`
         tokenized_cells = self._tokenize_files(loom_data_directory)
         cell_metadata = []
@@ -489,6 +494,75 @@ class TranscriptomeTokenizer:
 
         # Save dataset to disk
         tokenized_dataset.save_to_disk(output_path.with_suffix(".dataset"))
+
+        # Write token dictionary
+        write_pickle(self.tokens, output_directory / "token_dictionary.pickle")
+
+        # Write example lengths
+        write_pickle(tokenized_dataset["length"],
+                     output_directory / "example_lengths.pickle")
+
+        # Write sorted example lengths
+        write_pickle(sorted(tokenized_dataset["length"]),
+                     output_directory / "example_lengths.sorted.pickle")
+
+        return tokenized_dataset
+
+@inherit_doc
+class ExpressionAsNounTokenizer(AbstractTranscriptomeTokenizer):
+    """
+    Represent gene expression as a single token "<gene>_<quantile_expr_cutoff>"
+    """
+    def _fill_gene_tokens(self) -> None:
+        idx = len(self.tokens.keys())
+        for gene in self.gene_approx_cdfs.keys():
+            for quantile in self.gene_quantile_cutoffs:
+                self.tokens[f"{gene}_{quantile}"] = idx
+                idx += 1
+
+        self.tokens.get(f"{gene}_{quantile_cutoff}", -1)
+
+    def _get_gene_token(
+            self,
+            gene: str,
+            quantile_cutoff: int
+        ) -> int:
+
+        token = self.tokens.get(f"{gene}_{quantile_cutoff}", -1)
+
+        return token
+
+@inherit_doc
+class ExpressionAsAdjectiveTokenizer(AbstractTranscriptomeTokenizer):
+    """
+    Represent gene expression as a two linked tokens (adjective = expression,
+    gene = name) -> (<gene_token>, <quantile_cutoff_token>)
+    """
+
+    def _get_gene_token(
+            self,
+            gene: str,
+            quantile_cutoff: int
+        ) -> Tuple[int, ...]:
+        
+        quantile_token = self.tokens.get(quantile_cutoff)
+        gene_token = self.tokens.get(gene)
+
+        return quantile_token, gene_token
+
+    def _fill_gene_tokens(self) -> None:
+        # Obtain first available token
+        idx = len(self.tokens.keys())
+
+        # Fill with quantile tokens
+        for quantile in self.gene_quantile_cutoffs:
+            self.tokens[str(quantile)] = idx
+            idx += 1
+
+        # Fill with gene tokens
+        for gene in self.gene_approx_cdfs.keys():
+            self.tokens[str(gene)] = idx
+            idx += 1
 
 
 def parse_args():

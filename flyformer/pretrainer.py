@@ -57,6 +57,9 @@ _is_torch_generator_available = False
 if version.parse(torch.__version__) >= version.parse("1.6"):
     _is_torch_generator_available = True
 
+from transformers.utils import is_accelerate_available
+print("acce", is_accelerate_available())
+
 
 class ExplicitEnum(Enum):
     """
