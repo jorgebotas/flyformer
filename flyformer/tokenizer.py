@@ -216,6 +216,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
     def _get_gene_token(
             self,
             gene: str,
+            quantile: float,
             quantile_cutoff: int
         ) -> Union[int, tuple[int, ...]]:
         pass
@@ -255,7 +256,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         quantile_cutoff = self._get_gene_quantile_cutoff(quantile)
 
         # Obtain token from concrete class method
-        token = self._get_gene_token(gene, quantile_cutoff)
+        token = self._get_gene_token(gene, quantile, quantile_cutoff)
 
         return quantile, token
 
@@ -310,7 +311,8 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         # E.g. [ <expression_quantile_token>, <gene_name_token> ]
         sorted_gene_tokens_flatten = sorted_gene_tokens.flatten(order="C")
 
-        return sorted_gene_tokens_flatten
+        # Return truncated gene tokens to avoid memory overload
+        return sorted_gene_tokens_flatten[:self.embedding_size]
 
     @ray.remote
     def _tokenize_file(self, loom_file_path: Path) -> list:
@@ -424,10 +426,6 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
             Dataset containing tokenized cells
         """
 
-        def truncate(example):
-            example["input_ids"] = example["input_ids"][0:self.embedding_size]
-            return example
-
         def measure_length(example):
             """Measure length of example (max = `self.embedding_size`"""
             example["length"] = len(example["input_ids"])
@@ -441,13 +439,33 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         # create dataset
         output_dataset = Dataset.from_dict(dataset_dict)
 
-        output_dataset_truncated = output_dataset.map(truncate, num_proc=nproc)
-
-        output_dataset_w_length = output_dataset_truncated.map(
-            measure_length, num_proc=nproc
-        )
+        output_dataset_w_length = output_dataset.map(measure_length,
+                                                     num_proc=nproc)
 
         return output_dataset_w_length
+
+    def _save_dataset(self,
+            dataset: Dataset,
+            output_directory: Path,
+            output_prefix: str = "dataset",
+        ) -> None:
+
+        output_directory = Path(output_directory)
+        output_path = output_directory / output_prefix
+
+        # Save dataset to disk
+        tokenized_dataset.save_to_disk(output_path.with_suffix(".dataset"))
+
+        # Write token dictionary
+        write_pickle(self.tokens, output_directory / "token_dictionary.pickle")
+
+        # Write example lengths
+        write_pickle(tokenized_dataset["length"],
+                     output_directory / "example_lengths.pickle")
+
+        # Write sorted example lengths
+        write_pickle(sorted(tokenized_dataset["length"]),
+                     output_directory / "example_lengths.sorted.pickle")
 
     def tokenize_data(self,
             loom_data_directory: Path,
@@ -478,7 +496,6 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         """
         loom_data_directory = Path(loom_data_directory)
         output_directory = Path(output_directory)
-        output_path = output_directory / output_prefix
 
         # Create output directory if non-existant
         os.makedirs(output_directory, exist_ok=True)
@@ -492,19 +509,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
                                                  cell_metadata,
                                                  nproc=nproc)
 
-        # Save dataset to disk
-        tokenized_dataset.save_to_disk(output_path.with_suffix(".dataset"))
-
-        # Write token dictionary
-        write_pickle(self.tokens, output_directory / "token_dictionary.pickle")
-
-        # Write example lengths
-        write_pickle(tokenized_dataset["length"],
-                     output_directory / "example_lengths.pickle")
-
-        # Write sorted example lengths
-        write_pickle(sorted(tokenized_dataset["length"]),
-                     output_directory / "example_lengths.sorted.pickle")
+        self._save_dataset(dataset, output_dir, output_prefix)
 
         return tokenized_dataset
 
@@ -524,6 +529,7 @@ class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
     def _get_gene_token(
             self,
             gene: str,
+            quantile: float,
             quantile_cutoff: int
         ) -> int:
 
@@ -531,23 +537,11 @@ class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
 
         return token
 
-class ExpressionAsAdjectiveTokenizer(AbstractTranscriptomeTokenizer):
+class ExpressionQuantileCufoffTokenizer(AbstractTranscriptomeTokenizer):
     """
     Represent gene expression as a two linked tokens (adjective = expression,
     gene = name) -> (<gene_token>, <quantile_cutoff_token>)
     """
-
-    def _get_gene_token(
-            self,
-            gene: str,
-            quantile_cutoff: int
-        ) -> tuple[int, ...]:
-        
-        quantile_token = self.tokens.get(quantile_cutoff)
-        gene_token = self.tokens.get(gene)
-
-        return quantile_token, gene_token
-
     def _fill_gene_tokens(self) -> None:
         # Obtain first available token
         idx = len(self.tokens.keys())
@@ -561,6 +555,50 @@ class ExpressionAsAdjectiveTokenizer(AbstractTranscriptomeTokenizer):
         for gene in self.gene_approx_cdfs.keys():
             self.tokens[str(gene)] = idx
             idx += 1
+
+    def _get_gene_token(
+            self,
+            gene: str,
+            quantile: float,
+            quantile_cutoff: int
+        ) -> tuple[int, ...]:
+
+        
+        quantile_token = self.tokens[str(quantile_cutoff)]
+        gene_token = self.tokens[str(gene)]
+        
+        return quantile_token, gene_token
+
+class ExpressionQuantileAsAdjectiveTokenizer(AbstractTranscriptomeTokenizer):
+    """
+    Represent gene expression as a two linked tokens (adjective = expression,
+    gene = name) -> (<gene_token>, <quantile_cutoff_token>)
+    """
+    def _fill_gene_tokens(self) -> None:
+        # Obtain first available token
+        idx = len(self.tokens.keys())
+
+        # Fill with quantile tokens
+        for quantile in range(self.gene_approx_cdf_nsample):
+            self.tokens[str(quantile / self.gene_approx_cdf_nsample)] = idx
+            idx += 1
+
+        # Fill with gene tokens
+        for gene in self.gene_approx_cdfs.keys():
+            self.tokens[str(gene)] = idx
+            idx += 1
+
+    def _get_gene_token(
+            self,
+            gene: str,
+            quantile: float,
+            quantile_cutoff: int
+        ) -> tuple[int, ...]:
+        
+        quantile_token = self.tokens[str(quantile)]
+        gene_token = self.tokens[str(gene)]
+        
+        return quantile_token, gene_token
 
 
 def parse_args():
