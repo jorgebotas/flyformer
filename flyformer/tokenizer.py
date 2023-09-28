@@ -216,7 +216,6 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
     def _get_gene_token(
             self,
             gene: str,
-            quantile: float,
             quantile_cutoff: int
         ) -> Union[int, tuple[int, ...]]:
         pass
@@ -256,7 +255,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         quantile_cutoff = self._get_gene_quantile_cutoff(quantile)
 
         # Obtain token from concrete class method
-        token = self._get_gene_token(gene, quantile, quantile_cutoff)
+        token = self._get_gene_token(gene, quantile_cutoff)
 
         return quantile, token
 
@@ -454,17 +453,17 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         output_path = output_directory / output_prefix
 
         # Save dataset to disk
-        tokenized_dataset.save_to_disk(output_path.with_suffix(".dataset"))
+        dataset.save_to_disk(output_path.with_suffix(".dataset"))
 
         # Write token dictionary
         write_pickle(self.tokens, output_directory / "token_dictionary.pickle")
 
         # Write example lengths
-        write_pickle(tokenized_dataset["length"],
+        write_pickle(dataset["length"],
                      output_directory / "example_lengths.pickle")
 
         # Write sorted example lengths
-        write_pickle(sorted(tokenized_dataset["length"]),
+        write_pickle(sorted(dataset["length"]),
                      output_directory / "example_lengths.sorted.pickle")
 
     def tokenize_data(self,
@@ -509,7 +508,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
                                                  cell_metadata,
                                                  nproc=nproc)
 
-        self._save_dataset(dataset, output_dir, output_prefix)
+        self._save_dataset(tokenized_dataset, output_directory, output_prefix)
 
         return tokenized_dataset
 
@@ -529,7 +528,6 @@ class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
     def _get_gene_token(
             self,
             gene: str,
-            quantile: float,
             quantile_cutoff: int
         ) -> int:
 
@@ -537,7 +535,7 @@ class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
 
         return token
 
-class ExpressionQuantileCufoffTokenizer(AbstractTranscriptomeTokenizer):
+class ExpressionAsAdjectiveTokenizer(AbstractTranscriptomeTokenizer):
     """
     Represent gene expression as a two linked tokens (adjective = expression,
     gene = name) -> (<gene_token>, <quantile_cutoff_token>)
@@ -559,43 +557,11 @@ class ExpressionQuantileCufoffTokenizer(AbstractTranscriptomeTokenizer):
     def _get_gene_token(
             self,
             gene: str,
-            quantile: float,
             quantile_cutoff: int
         ) -> tuple[int, ...]:
 
         
         quantile_token = self.tokens[str(quantile_cutoff)]
-        gene_token = self.tokens[str(gene)]
-        
-        return quantile_token, gene_token
-
-class ExpressionQuantileAsAdjectiveTokenizer(AbstractTranscriptomeTokenizer):
-    """
-    Represent gene expression as a two linked tokens (adjective = expression,
-    gene = name) -> (<gene_token>, <quantile_cutoff_token>)
-    """
-    def _fill_gene_tokens(self) -> None:
-        # Obtain first available token
-        idx = len(self.tokens.keys())
-
-        # Fill with quantile tokens
-        for quantile in range(self.gene_approx_cdf_nsample):
-            self.tokens[str(quantile / self.gene_approx_cdf_nsample)] = idx
-            idx += 1
-
-        # Fill with gene tokens
-        for gene in self.gene_approx_cdfs.keys():
-            self.tokens[str(gene)] = idx
-            idx += 1
-
-    def _get_gene_token(
-            self,
-            gene: str,
-            quantile: float,
-            quantile_cutoff: int
-        ) -> tuple[int, ...]:
-        
-        quantile_token = self.tokens[str(quantile)]
         gene_token = self.tokens[str(gene)]
         
         return quantile_token, gene_token
