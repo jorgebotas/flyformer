@@ -1,6 +1,5 @@
 from pathlib import Path
 import pickle
-from types import FunctionType
 from typing import Union
 
 

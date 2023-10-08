@@ -18,16 +18,18 @@ Usage:
 
 from abc import ABCMeta, abstractmethod
 import argparse
-from datasets import Dataset
-import loompy as lp
 import logging
-import numpy as np
 import os
 from pathlib import Path
-import ray
-from tqdm import tqdm
 from typing import Optional, Union
 import warnings
+
+import numpy as np
+from tqdm import tqdm
+
+from datasets import Dataset
+import loompy as lp
+import ray
 
 from .helper import read_pickle, write_pickle
 
@@ -94,7 +96,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         else:
             # Gene expression TDigest(s)
             print(f"Loading TDigest(s): {gene_tdigest_file}")
-            gene_tdigests = read_pickle(gene_tdigest_file)
+            gene_tdigests = read_pickle(Path(str(gene_tdigest_file)))
             # Approximate CDF for gene token optimization
             self.gene_approx_cdf_nsample = gene_approx_cdf_nsample
             print(f"Approximating CDFs from TDigest(s).\
@@ -121,7 +123,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
 
     def _approximate_gene_cdfs(self,
             gene_tdigests: dict,
-       ) -> None:
+       ) -> dict:
         """
         Compute gene approximate CDF based on tdigest file. Sample each gene
         expression distribution `self.gene_approx_cdf_nsample` times, equally
@@ -191,7 +193,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         cdf_idx = np.argmax(gene_cdf >= expression)
 
         # Equivalent to cdf_idx / len(gene_cdf)
-        expr_quantile = (cdf_idx / self.gene_approx_cdf_nsample)
+        expr_quantile = float(cdf_idx / self.gene_approx_cdf_nsample)
 
         return expr_quantile
 
@@ -412,7 +414,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         tokenized_cells: list
             Matrix of tokenized cells. Each cell is represented as a set of
             `self.tokens` sorted in decreasing order or relative
-            expression across data corpus.
+            expression across data corpus. 
         cell_metadata: list
             Metadata associated to each cell. E.g. cell-type, organ,...
         nproc: int
@@ -522,8 +524,6 @@ class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
             for quantile in self.gene_quantile_cutoffs:
                 self.tokens[f"{gene}_{quantile}"] = idx
                 idx += 1
-
-        self.tokens.get(f"{gene}_{quantile_cutoff}", -1)
 
     def _get_gene_token(
             self,
