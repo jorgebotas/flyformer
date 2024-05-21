@@ -514,6 +514,26 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
 
         return tokenized_dataset
 
+class GeneTokenizer(AbstractTranscriptomeTokenizer):
+    """
+    Represent gene expression as a single token "<gene>"
+    """
+    def _fill_gene_tokens(self) -> None:
+        idx = len(self.tokens.keys())
+        for gene in self.gene_approx_cdfs.keys():
+            self.tokens[f"{gene}"] = idx
+            idx += 1
+
+    def _get_gene_token(
+            self,
+            gene: str,
+            quantile_cutoff: int
+        ) -> int:
+
+        token = self.tokens.get(f"{gene}", -1)
+
+        return token
+
 class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
     """
     Represent gene expression as a single token "<gene>_<quantile_expr_cutoff>"
