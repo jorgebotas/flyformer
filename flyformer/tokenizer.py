@@ -534,6 +534,20 @@ class GeneMedianTokenizer(AbstractTranscriptomeTokenizer):
 
         self.embedding_size = embedding_size
 
+    def _fill_gene_tokens(self) -> None:
+        """
+        Fills self.tokens with data from self._approximate_gene_cdfs
+        and self.gene_quantiles
+        """
+        pass
+
+    def _get_gene_token(
+            self,
+            gene: str,
+            quantile_cutoff: int
+        ):
+        pass
+
     def _tokenize_gene(
             self,
             gene: str,
