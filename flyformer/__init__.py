@@ -1,2 +1,2 @@
-from .tokenizer import ExpressionCombinedTokenizer, ExpressionAsAdjectiveTokenizer
+from .tokenizer import ExpressionCombinedTokenizer, ExpressionAsAdjectiveTokenizer, GeneMedianTokenizer
 from .pretrainer import FlyformerPretrainer
