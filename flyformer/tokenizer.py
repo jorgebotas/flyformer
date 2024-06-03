@@ -105,9 +105,9 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
                     n = {self.gene_approx_cdf_nsample}")
             self.gene_approx_cdfs = self._approximate_gene_cdfs(gene_tdigests)
 
-        self.tokens = { "<pad>": 0, "<mask>": 1 }
+        self.vocab = { "<pad>": 0, "<mask>": 1 }
         self._fill_gene_tokens()
-        print(f"Vocabulary size: {len(self.tokens.keys())}")
+        print(f"Vocabulary size: {len(self.vocab.keys())}")
 
         # Model input size (embedding)
         self.embedding_size = embedding_size
@@ -165,7 +165,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
     @abstractmethod
     def _fill_gene_tokens(self) -> None:
         """
-        Fills self.tokens with data from self._approximate_gene_cdfs
+        Fills self.vocab with data from self._approximate_gene_cdfs
         and self.gene_quantiles
         """
         pass
@@ -248,7 +248,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
             associated to gene expression when compared to whole corpus.
         token: Union[int, tuple[int, ...]
             Token associated to gene and expression level (based on
-            `self.gene_quantile_cutoffs`). See `self.tokens`
+            `self.gene_quantile_cutoffs`). See `self.vocab`
             The value could be either a single token (int) or a tuple of tokens
             that will be flattened in the final cell's representation
         """
@@ -415,7 +415,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         ----------
         tokenized_cells: list
             Matrix of tokenized cells. Each cell is represented as a set of
-            `self.tokens` sorted in decreasing order or relative
+            `self.vocab` sorted in decreasing order or relative
             expression across data corpus. 
         cell_metadata: list
             Metadata associated to each cell. E.g. cell-type, organ,...
@@ -460,7 +460,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         dataset.save_to_disk(str(output_path.with_suffix(".dataset")))
 
         # Write token dictionary
-        write_pickle(self.tokens, output_directory / "token_dictionary.pickle")
+        write_pickle(self.vocab, output_directory / "token_dictionary.pickle")
 
         # Write example lengths
         write_pickle(dataset["length"],
@@ -536,7 +536,7 @@ class GeneMedianTokenizer(AbstractTranscriptomeTokenizer):
 
     def _fill_gene_tokens(self) -> None:
         """
-        Fills self.tokens with data from self._approximate_gene_cdfs
+        Fills self.vocab with data from self._approximate_gene_cdfs
         and self.gene_quantiles
         """
         pass
@@ -572,7 +572,7 @@ class GeneMedianTokenizer(AbstractTranscriptomeTokenizer):
             associated to gene expression when compared to whole corpus.
         token: Union[int, tuple[int, ...]
             Token associated to gene and expression level (based on
-            `self.gene_quantile_cutoffs`). See `self.tokens`
+            `self.gene_quantile_cutoffs`). See `self.vocab`
             The value could be either a single token (int) or a tuple of tokens
             that will be flattened in the final cell's representation
         """
@@ -698,10 +698,10 @@ class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
     Represent gene expression as a single token "<gene>_<quantile_expr_cutoff>"
     """
     def _fill_gene_tokens(self) -> None:
-        idx = len(self.tokens.keys())
+        idx = len(self.vocab.keys())
         for gene in self.gene_approx_cdfs.keys():
             for quantile in self.gene_quantile_cutoffs:
-                self.tokens[f"{gene}_{quantile}"] = idx
+                self.vocab[f"{gene}_{quantile}"] = idx
                 idx += 1
 
     def _get_gene_token(
@@ -710,7 +710,7 @@ class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
             quantile_cutoff: int
         ) -> int:
 
-        token = self.tokens.get(f"{gene}_{quantile_cutoff}", -1)
+        token = self.vocab.get(f"{gene}_{quantile_cutoff}", -1)
 
         return token
 
@@ -721,16 +721,16 @@ class ExpressionAsAdjectiveTokenizer(AbstractTranscriptomeTokenizer):
     """
     def _fill_gene_tokens(self) -> None:
         # Obtain first available token
-        idx = len(self.tokens.keys())
+        idx = len(self.vocab.keys())
 
         # Fill with quantile tokens
         for quantile in self.gene_quantile_cutoffs:
-            self.tokens[str(quantile)] = idx
+            self.vocab[str(quantile)] = idx
             idx += 1
 
         # Fill with gene tokens
         for gene in self.gene_approx_cdfs.keys():
-            self.tokens[str(gene)] = idx
+            self.vocab[str(gene)] = idx
             idx += 1
 
     def _get_gene_token(
@@ -740,8 +740,8 @@ class ExpressionAsAdjectiveTokenizer(AbstractTranscriptomeTokenizer):
         ) -> tuple[int, ...]:
 
         
-        quantile_token = self.tokens[str(quantile_cutoff)]
-        gene_token = self.tokens[str(gene)]
+        quantile_token = self.vocab[str(quantile_cutoff)]
+        gene_token = self.vocab[str(gene)]
         
         return quantile_token, gene_token
 
