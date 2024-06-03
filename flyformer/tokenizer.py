@@ -457,7 +457,7 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
         output_path = output_directory / output_prefix
 
         # Save dataset to disk
-        dataset.save_to_disk(output_path.with_suffix(".dataset"))
+        dataset.save_to_disk(str(output_path.with_suffix(".dataset")))
 
         # Write token dictionary
         write_pickle(self.tokens, output_directory / "token_dictionary.pickle")
