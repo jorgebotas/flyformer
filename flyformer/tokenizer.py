@@ -23,12 +23,14 @@ import os
 from pathlib import Path
 from typing import Optional, Union
 import warnings
+import json
 
 import numpy as np
 from tqdm import tqdm
 
 from datasets import Dataset
 import loompy as lp
+from anndata import read_h5ad
 import ray
 
 from .helper import read_pickle, write_pickle
@@ -514,25 +516,168 @@ class AbstractTranscriptomeTokenizer(metaclass=ABCMeta):
 
         return tokenized_dataset
 
-class GeneTokenizer(AbstractTranscriptomeTokenizer):
+class GeneMedianTokenizer(AbstractTranscriptomeTokenizer):
     """
     Represent gene expression as a single token "<gene>"
     """
-    def _fill_gene_tokens(self) -> None:
-        idx = len(self.tokens.keys())
-        for gene in self.gene_approx_cdfs.keys():
-            self.tokens[f"{gene}"] = idx
-            idx += 1
+    def __init__(
+            self,
+            gene_median_file: Path,
+            vocab_file: Path,
+            embedding_size: int = EMBEDDING_SIZE,
+        ):
+        with open(vocab_file) as fp:
+            self.vocab = json.load(fp)
 
-    def _get_gene_token(
+        with open(gene_median_file) as fp:
+            self.gene_medians = json.load(fp)
+
+        self.embedding_size = embedding_size
+
+    def _tokenize_gene(
             self,
             gene: str,
-            quantile_cutoff: int
-        ) -> int:
+            expression: float
+        ) -> tuple[float, Union[int, tuple[int, ...]]]:
+        """
+        Return gene expression quantile and gene token(s).
+        Quantile is relative to Cumulative  Distribution Function (CDF) 
+        approximated from gene's expression data stored in TDigest.
 
-        token = self.tokens.get(f"{gene}", -1)
+        Parameters
+        ----------
+        gene: str
+            Gene name (Flybase). Keys in `self.gene_approx_cdfs`
+        expression: float
+            1e4 normalized and log1p transformed gene expression
 
-        return token
+        Returns
+        ----------
+        quantile: float
+            Quantile in approximated CDF,
+            associated to gene expression when compared to whole corpus.
+        token: Union[int, tuple[int, ...]
+            Token associated to gene and expression level (based on
+            `self.gene_quantile_cutoffs`). See `self.tokens`
+            The value could be either a single token (int) or a tuple of tokens
+            that will be flattened in the final cell's representation
+        """
+        token = self.vocab[gene]
+        normalized_expression = expression / self.gene_medians[gene]
+        return token, normalized_expression
+
+    def _tokenize_cell(
+            self,
+            cell_data: np.ndarray,
+            genes: np.ndarray
+        ) -> np.ndarray:
+        """
+        Converts normalized gene expression vector to tokenized rank value
+        encoding. Relative gene expression value (quantile) is calculated based
+        on the gene's approximated cdf obtained from TDigest.
+            e.g. 0.93 > 0.81 > 0.13
+
+        Parameters
+        ----------
+        cell_data: np.ndarray
+            Log1p-transformed gene expression data for single cell
+        genes: np.ndarray
+            Genes to be tokenized based on cell expression data
+
+        Returns
+        ----------
+        gene_tokens: np.ndarray
+            Sorted gene tokens in ascending order of relative gene expression
+            across corpus. Output is truncated to a maximum length equal to
+            `self.embedding_size` (maximum model input size)
+        """
+        # Limit tokenization to non-zero expression genes
+        nonzero_mask = cell_data > 0
+        nonzero_genes = genes[nonzero_mask]
+        nonzero_expression = cell_data[nonzero_mask]
+
+        # Tokenize each gene with non-zero expression in cell data
+        gene_tokens, normalized_expression = zip(*[
+            self._tokenize_gene(gene, expr)
+                for gene, expr in zip(nonzero_genes, nonzero_expression)
+        ])
+
+        # Convert to np.ndarray
+        normalized_expression = np.array(normalized_expression)
+        gene_tokens = np.array(gene_tokens)
+
+        # Obtain indices from descending sorted normalized expression values
+        sorted_indices = np.argsort(-normalized_expression)
+
+        # Sort tokens by descending normalized expression
+        sorted_gene_tokens = gene_tokens[sorted_indices]
+
+        # Flatten gene_tokens (row-major, C-order) to consider gene
+        # representations with more than token per gene.
+        # E.g. [ <expression_normalized_token>, <gene_name_token> ]
+        sorted_gene_tokens_flatten = sorted_gene_tokens.flatten(order="C")
+
+        # Return truncated gene tokens to avoid memory overload
+        return sorted_gene_tokens_flatten[:self.embedding_size]
+
+    def _tokenize_file(self, adata_path: Path) -> list:
+        tokenized_cells = []
+        tqdm_desc = f"Tokenizing {adata_path}"
+        adata = read_h5ad(adata_path)
+        genes = np.array(adata.var_names)
+        cells = np.array(adata.obs_names)
+
+        # Tokenize each cell in .loom file
+        for idx, cell in enumerate(tqdm(cells, desc=tqdm_desc)):
+            cell_data = adata[idx, :].X.toarray().flatten()
+            tokenized_cells.append(self._tokenize_cell(cell_data, genes))
+
+        return tokenized_cells
+
+    def tokenize_data(self,
+            adata: Path,
+            output_directory: Path,
+            output_prefix: str = "dataset",
+            nproc: int = 1,
+        ) -> Dataset:
+        """
+        Tokenize single cell gene expression data from a collection of
+        preprocessed .loom files contained in `loom_data_directory`. See
+        `flyformer.data_preprocessing` to properly format .loom files PRIOR to
+        tokenization. File tokenization is parallelized using Ray.
+
+        Tokenized single cell gene expression data will be saved as .dataset in
+        `output_directory` (Apache Arrow format)
+
+        Parameters
+        ----------
+        loom_data_directory : Path
+            Path to directory containing loom files
+        output_directory : Path
+            Path to directory where tokenized data will be saved as .dataset
+        output_prefix : str
+            Prefix for output .dataset
+        nproc: int
+            Number of processors used for .dataset formatting (truncating and
+            calculating example length)
+        """
+        output_directory = Path(output_directory)
+
+        # Create output directory if non-existant
+        os.makedirs(output_directory, exist_ok=True)
+
+        # Tokenize cells from files in `loom_data_directory`
+        tokenized_cells = self._tokenize_file(adata)
+        cell_metadata = []
+
+        # Create dataset
+        tokenized_dataset = self._create_dataset(tokenized_cells,
+                                                 cell_metadata,
+                                                 nproc=nproc)
+
+        self._save_dataset(tokenized_dataset, output_directory, output_prefix)
+
+        return tokenized_dataset
 
 class ExpressionCombinedTokenizer(AbstractTranscriptomeTokenizer):
     """
